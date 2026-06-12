@@ -95,6 +95,7 @@ def three_way_probs(
     rating_home: float,
     rating_away: float,
     is_host: bool = False,
+    cards_penalty: Optional[dict] = None,
 ) -> dict[str, float]:
     """
     Convert Elo ratings into three-way (home win / draw / away win) probabilities.
@@ -108,15 +109,24 @@ def three_way_probs(
     rating_away : float
     is_host : bool
         If True, applies the larger host-nation Elo boost.
+    cards_penalty : dict, optional
+        Per-team Elo penalty from accumulated cards / suspensions.
+        Keys: 'home', 'away'.  Values are Elo points to subtract (positive = penalty).
+        Typical values: 50 per yellow-card risk, 150 per suspension.
+        Example: {"home": 50, "away": 150}
 
     Returns
     -------
     dict with keys 'home', 'draw', 'away'.
     """
-    boost = ELO_BOOST_HOST if is_host else ELO_BOOST_STANDARD
-    p_home_raw = elo_win_prob(rating_home, rating_away, boost)
+    penalty = cards_penalty or {}
+    effective_home = rating_home - penalty.get("home", 0)
+    effective_away = rating_away - penalty.get("away", 0)
 
-    elo_diff = abs(rating_home - rating_away + boost)
+    boost = ELO_BOOST_HOST if is_host else ELO_BOOST_STANDARD
+    p_home_raw = elo_win_prob(effective_home, effective_away, boost)
+
+    elo_diff = abs(effective_home - effective_away + boost)
     p_draw = 0.28 * math.exp(-((elo_diff / 600.0) ** 1.5))
     p_draw = min(p_draw, min(p_home_raw, 1.0 - p_home_raw) * 0.85)
 
