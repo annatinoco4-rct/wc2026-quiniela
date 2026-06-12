@@ -1,0 +1,62 @@
+{
+  "meta": {
+    "player": "Ana Tinoco",
+    "pool": "Quiniela Avera 2026",
+    "platform": "Prodemaster",
+    "scoring": {"exact": 3, "result": 1, "champion": 6},
+    "champion_pick": "Francia"
+  },
+  "picks": [
+    {
+      "match_id": "A1",
+      "date": "2026-06-11",
+      "home": "México",
+      "away": "Sudáfrica",
+      "group": "A",
+      "my_pick": "2-0",
+      "actual": "2-0",
+      "points": 3,
+      "note": "Intuición divina > modelo (modelo sugería 1-0)"
+    },
+    {
+      "match_id": "A2",
+      "date": "2026-06-11",
+      "home": "Corea del Sur",
+      "away": "Chequia",
+      "group": "A",
+      "my_pick": "1-0",
+      "actual": "2-1",
+      "points": 1,
+      "note": "Resultado correcto, marcador exacto fallido"
+    },
+    {
+      "match_id": "B1",
+      "date": "2026-06-12",
+      "home": "Canadá",
+      "away": "Bosnia",
+      "group": "B",
+      "my_pick": "2-0",
+      "actual": null,
+      "points": null,
+      "note": "Modelo: 2-0 Canadá"
+    },
+    {
+      "match_id": "D1",
+      "date": "2026-06-12",
+      "home": "USA",
+      "away": "Paraguay",
+      "group": "D",
+      "my_pick": "1-0",
+      "actual": null,
+      "points": null,
+      "note": "Partido cerrado, Enciso baja por lesión"
+    }
+  ],
+  "summary": {
+    "total_points": 4,
+    "exact_hits": 1,
+    "result_hits": 1,
+    "misses": 0,
+    "pending": 2
+  }
+}

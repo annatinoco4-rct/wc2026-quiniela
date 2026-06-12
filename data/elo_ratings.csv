@@ -1,0 +1,48 @@
+team,elo,group,confederation,is_host
+México,1836,A,CONCACAF,True
+Sudáfrica,1640,A,CAF,False
+Corea del Sur,1800,A,AFC,False
+Chequia,1762,A,UEFA,False
+Canadá,1783,B,CONCACAF,True
+Bosnia,1700,B,UEFA,False
+Qatar,1610,B,AFC,False
+Suiza,1897,B,UEFA,False
+Brasil,1979,C,CONMEBOL,False
+Marruecos,1820,C,CAF,False
+Haití,1450,C,CONCACAF,False
+Escocia,1760,C,UEFA,False
+USA,1818,D,CONCACAF,True
+Paraguay,1740,D,CONMEBOL,False
+Australia,1768,D,AFC,False
+Turquía,1880,D,UEFA,False
+Alemania,1910,E,UEFA,False
+Curazao,1380,E,CONCACAF,False
+Países Bajos,1959,E,UEFA,False
+Japón,1879,E,AFC,False
+España,2171,F,UEFA,False
+Cabo Verde,1590,F,CAF,False
+Bélgica,1849,F,UEFA,False
+Egipto,1680,F,CAF,False
+Arabia Saudita,1680,G,AFC,False
+Uruguay,1890,G,CONMEBOL,False
+Irán,1730,G,AFC,False
+Nueva Zelanda,1560,G,OFC,False
+Francia,2063,H,UEFA,False
+Albania,1650,H,UEFA,False
+Portugal,1976,H,UEFA,False
+Argentina,2113,H,CONMEBOL,False
+Inglaterra,2042,I,UEFA,False
+Croacia,1933,I,UEFA,False
+Ghana,1660,I,CAF,False
+Panamá,1650,I,CONCACAF,False
+Colombia,1998,J,CONMEBOL,False
+Ecuador,1933,J,CONMEBOL,False
+Senegal,1869,J,CAF,False
+Uzbekistán,1580,J,AFC,False
+Italia,1859,K,UEFA,False
+Congo DR,1550,K,CAF,False
+Serbia,1820,K,UEFA,False
+Jordania,1620,K,AFC,False
+Dinamarca,1864,L,UEFA,False
+Costa Rica,1700,L,CONCACAF,False
+Iraq,1620,L,AFC,False
