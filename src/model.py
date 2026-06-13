@@ -66,6 +66,83 @@ ELO_RATINGS: dict[str, int] = {
 
 
 # ---------------------------------------------------------------------------
+# Draw tendency: style-of-play factor
+# ---------------------------------------------------------------------------
+
+DRAW_TENDENCY: dict[str, float] = {
+    # Draw-prone teams (positive values, range 0 to +1)
+    "Bosnia":         0.8,
+    "Irán":           0.7,
+    "Marruecos":      0.6,
+    "Costa Rica":     0.6,
+    "Arabia Saudita": 0.5,
+    # Decisive teams that tend to produce clear winners (negative values, -1 to 0)
+    "Argentina":      -0.6,
+    "España":         -0.5,
+    "Francia":        -0.5,
+    "Brasil":         -0.4,
+    "Alemania":       -0.4,
+    # All other teams implicitly default to 0.0 (neutral)
+}
+
+
+# ---------------------------------------------------------------------------
+# Venue climate: average June temperatures per host city (°C)
+# ---------------------------------------------------------------------------
+
+VENUE_TEMP: dict[str, int] = {
+    "Ciudad de México": 18,
+    "Guadalajara":      22,
+    "Monterrey":        35,
+    "Dallas":           34,
+    "Los Ángeles":      24,
+    "San Francisco":    17,
+    "Nueva York":       26,
+    "Boston":           22,
+    "Miami":            31,
+    "Seattle":          18,
+    "Kansas City":      28,
+    "Atlanta":          28,
+    "Toronto":          22,
+    "Vancouver":        18,
+}
+
+# Confederation per team — used for climate and altitude adjustments
+CONFEDERATION: dict[str, str] = {
+    # UEFA (European teams — penalised in extreme heat)
+    "España": "UEFA", "Francia": "UEFA", "Alemania": "UEFA",
+    "Países Bajos": "UEFA", "Inglaterra": "UEFA", "Portugal": "UEFA",
+    "Suiza": "UEFA", "Chequia": "UEFA", "Escocia": "UEFA",
+    "Bosnia": "UEFA", "Albania": "UEFA", "Croacia": "UEFA",
+    "Serbia": "UEFA", "Dinamarca": "UEFA", "Italia": "UEFA",
+    "Bélgica": "UEFA", "Turquía": "UEFA",
+    # CAF (African teams — warm-climate, penalised in cold venues)
+    "Marruecos": "CAF", "Senegal": "CAF", "Egipto": "CAF",
+    "Ghana": "CAF", "Congo DR": "CAF", "Sudáfrica": "CAF", "Cabo Verde": "CAF",
+    # CONCACAF
+    "México": "CONCACAF", "USA": "CONCACAF", "Canadá": "CONCACAF",
+    "Curazao": "CONCACAF", "Haití": "CONCACAF", "Panamá": "CONCACAF",
+    "Costa Rica": "CONCACAF",
+    # CONMEBOL
+    "Brasil": "CONMEBOL", "Argentina": "CONMEBOL", "Uruguay": "CONMEBOL",
+    "Colombia": "CONMEBOL", "Ecuador": "CONMEBOL", "Paraguay": "CONMEBOL",
+    # AFC
+    "Corea del Sur": "AFC", "Japón": "AFC", "Irán": "AFC",
+    "Arabia Saudita": "AFC", "Australia": "AFC", "Uzbekistán": "AFC",
+    "Qatar": "AFC", "Jordania": "AFC", "Iraq": "AFC",
+    # OFC
+    "Nueva Zelanda": "OFC",
+}
+
+# Teams from habitually warm/humid climates — penalised when playing in cold venues (<20°C)
+# Includes all CAF + tropical CONMEBOL (Brasil, Colombia, Ecuador)
+WARM_CLIMATE_TEAMS: set[str] = {
+    "Marruecos", "Senegal", "Egipto", "Ghana", "Congo DR", "Sudáfrica", "Cabo Verde",
+    "Brasil", "Colombia", "Ecuador",
+}
+
+
+# ---------------------------------------------------------------------------
 # Elo model
 # ---------------------------------------------------------------------------
 
@@ -96,9 +173,14 @@ def three_way_probs(
     rating_away: float,
     is_host: bool = False,
     cards_penalty: Optional[dict] = None,
+    home_team: Optional[str] = None,
+    away_team: Optional[str] = None,
+    venue: Optional[str] = None,
+    travel_fatigue: Optional[dict] = None,
 ) -> dict[str, float]:
     """
-    Convert Elo ratings into three-way (home win / draw / away win) probabilities.
+    Convert Elo ratings into three-way (home win / draw / away win) probabilities,
+    optionally adjusted for draw tendency, venue climate, and travel fatigue.
 
     Draw probability is modelled as a bell-shaped function of Elo difference,
     peaking when teams are evenly matched and decaying for large mismatches.
@@ -112,17 +194,85 @@ def three_way_probs(
     cards_penalty : dict, optional
         Per-team Elo penalty from accumulated cards / suspensions.
         Keys: 'home', 'away'.  Values are Elo points to subtract (positive = penalty).
-        Typical values: 50 per yellow-card risk, 150 per suspension.
         Example: {"home": 50, "away": 150}
+
+    home_team : str, optional
+        Team name for the home side.  Used to look up DRAW_TENDENCY and
+        CONFEDERATION for climate adjustments.  If omitted, those features
+        are skipped (fully retrocompatible).
+    away_team : str, optional
+        Team name for the away side.  Same as above.
+
+    venue : str, optional
+        Host-city name (must be a key in VENUE_TEMP).  Triggers climate
+        Elo adjustments:
+          - Temp > 28°C : UEFA teams receive -30 Elo.
+          - Temp < 20°C : warm-climate teams (CAF / tropical CONMEBOL)
+                          receive -20 Elo.
+        Has no effect when home_team / away_team are not provided.
+
+    travel_fatigue : dict, optional
+        Per-team travel information.  Shape::
+
+            {
+                "home": {"hours": float, "rest_days": int},
+                "away": {"hours": float, "rest_days": int},
+            }
+
+        Any team that travelled > 6 hours AND had < 4 rest days since
+        their previous match receives a -40 Elo penalty.
+        Only provide the sides that are affected; the other side is ignored.
 
     Returns
     -------
-    dict with keys 'home', 'draw', 'away'.
+    dict with keys 'home', 'draw', 'away' summing to 1.0.
+
+    Notes
+    -----
+    Draw-tendency adjustment:
+        A joint factor is computed as the average of both teams' DRAW_TENDENCY
+        values (defaulting to 0.0 for unlisted teams).  The base draw probability
+        is then scaled by ``1 + 0.40 * joint_factor``, giving a maximum of +40%
+        increase (both teams strongly draw-prone) or –40% reduction (both strongly
+        decisive).  Adjustment is applied before floor/ceiling clamping.
     """
+    # --- Cards / suspension penalties ------------------------------------------
     penalty = cards_penalty or {}
     effective_home = rating_home - penalty.get("home", 0)
     effective_away = rating_away - penalty.get("away", 0)
 
+    # --- Climate adjustment (venue temperature) --------------------------------
+    if venue and venue in VENUE_TEMP and home_team and away_team:
+        temp = VENUE_TEMP[venue]
+        home_conf = CONFEDERATION.get(home_team, "")
+        away_conf = CONFEDERATION.get(away_team, "")
+
+        if temp > 28:
+            # Heat penalty for European teams unaccustomed to extreme warmth
+            if home_conf == "UEFA":
+                effective_home -= 30
+            if away_conf == "UEFA":
+                effective_away -= 30
+        elif temp < 20:
+            # Cold penalty for habitually warm-climate teams
+            if home_team in WARM_CLIMATE_TEAMS:
+                effective_home -= 20
+            if away_team in WARM_CLIMATE_TEAMS:
+                effective_away -= 20
+
+    # --- Travel fatigue penalty ------------------------------------------------
+    if travel_fatigue:
+        for side, rating_attr in (("home", "effective_home"), ("away", "effective_away")):
+            info = travel_fatigue.get(side, {})
+            hours     = info.get("hours", 0.0)
+            rest_days = info.get("rest_days", 99)
+            if hours > 6 and rest_days < 4:
+                if side == "home":
+                    effective_home -= 40
+                else:
+                    effective_away -= 40
+
+    # --- Base Elo probabilities ------------------------------------------------
     boost = ELO_BOOST_HOST if is_host else ELO_BOOST_STANDARD
     p_home_raw = elo_win_prob(effective_home, effective_away, boost)
 
@@ -130,11 +280,19 @@ def three_way_probs(
     p_draw = 0.28 * math.exp(-((elo_diff / 600.0) ** 1.5))
     p_draw = min(p_draw, min(p_home_raw, 1.0 - p_home_raw) * 0.85)
 
+    # --- Draw-tendency adjustment ----------------------------------------------
+    if home_team and away_team:
+        home_t = DRAW_TENDENCY.get(home_team, 0.0)
+        away_t = DRAW_TENDENCY.get(away_team, 0.0)
+        joint_factor = (home_t + away_t) / 2.0
+        # Scale: +40% max increase (both +1.0), -40% max reduction (both -1.0)
+        p_draw = p_draw * (1.0 + 0.40 * joint_factor)
+
+    # --- Floor / ceiling and re-normalise --------------------------------------
     p_win  = max(0.03, p_home_raw - p_draw / 2.0)
     p_draw = max(0.05, p_draw)
     p_loss = max(0.03, 1.0 - p_win - p_draw)
 
-    # Re-normalise to sum to 1
     total = p_win + p_draw + p_loss
     return {
         "home": p_win  / total,
@@ -295,24 +453,66 @@ def consensus_bias(home_team: str, probs: dict[str, float]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 def analyse_match(
-    home:    str,
-    away:    str,
-    is_host: bool = False,
+    home:           str,
+    away:           str,
+    is_host:        bool = False,
+    venue:          Optional[str] = None,
+    travel_fatigue: Optional[dict] = None,
 ) -> dict:
     """
     Run full analysis for a single match.
 
-    Returns a dict with: probs, xg, scores, ev, consensus.
+    Parameters
+    ----------
+    home : str
+        Home team name (must be a key in ELO_RATINGS or defaults to 1600).
+    away : str
+        Away team name.
+    is_host : bool
+        True if the home team is a 2026 host nation (applies larger Elo boost).
+    venue : str, optional
+        Host-city name (key in VENUE_TEMP).  Passed to three_way_probs() to
+        trigger climate Elo adjustments.
+    travel_fatigue : dict, optional
+        Travel information for either or both teams.  Shape::
+
+            {
+                "home": {"hours": float, "rest_days": int},
+                "away": {"hours": float, "rest_days": int},
+            }
+
+        Teams that travelled > 6 hours with < 4 rest days receive -40 Elo.
+
+    Returns
+    -------
+    dict with keys: home, away, elo, probs, xg, top_scores, ev, consensus,
+                    venue (if provided), adjustments_applied (list of strings).
     """
     r_home = ELO_RATINGS.get(home, 1600)
     r_away = ELO_RATINGS.get(away, 1600)
 
     boost  = ELO_BOOST_HOST if is_host else ELO_BOOST_STANDARD
-    probs  = three_way_probs(r_home, r_away, is_host)
+    probs  = three_way_probs(
+        r_home, r_away,
+        is_host        = is_host,
+        home_team      = home,
+        away_team      = away,
+        venue          = venue,
+        travel_fatigue = travel_fatigue,
+    )
     lh, la = expected_goals(r_home, r_away, boost)
     scores = score_matrix(lh, la)
     ev     = compute_ev(scores, probs, home, away)
     cons   = consensus_bias(home, probs)
+
+    # Log which optional adjustments were active
+    adjustments = []
+    if venue:
+        adjustments.append(f"climate:{venue}")
+    if travel_fatigue:
+        adjustments.append(f"travel_fatigue:{list(travel_fatigue.keys())}")
+    if home in DRAW_TENDENCY or away in DRAW_TENDENCY:
+        adjustments.append("draw_tendency")
 
     return {
         "home": home, "away": away,
@@ -322,6 +522,8 @@ def analyse_match(
         "top_scores": scores[:6],
         "ev": ev,
         "consensus": cons,
+        "venue": venue,
+        "adjustments_applied": adjustments,
     }
 
 
@@ -349,4 +551,39 @@ if __name__ == "__main__":
         print(f"    {s['score']:>5}   {s['prob']:.1%}")
     print(f"\n  ✓ Optimal pick : {ev.best_pick}  (EV = {ev.best_ev:.3f} pts)")
     print(f"  Consensus edge : {result['consensus']['edge']:+.1%}")
+    print()
+
+    # ------------------------------------------------------------------
+    # Example: draw-tendency + climate + travel fatigue in action
+    # ------------------------------------------------------------------
+    print("─" * 50)
+    print("  Feature demo: Bosnia vs Irán  @  Monterrey")
+    print("  (draw-prone teams + extreme heat venue)")
+    print("─" * 50)
+    demo = analyse_match(
+        home           = "Bosnia",
+        away           = "Irán",
+        venue          = "Monterrey",   # 35°C — UEFA gets -30 Elo (neither team is UEFA here)
+        travel_fatigue = {
+            "away": {"hours": 9.5, "rest_days": 3},  # Irán: long flight + short rest → -40 Elo
+        },
+    )
+    dp = demo["probs"]
+    print(f"  Draw prob (with draw-tendency boost): {dp['draw']:.1%}")
+    print(f"  Home win : {dp['home']:.1%}  |  Away win: {dp['away']:.1%}")
+    print(f"  Adjustments active: {demo['adjustments_applied']}")
+
+    print()
+    print("─" * 50)
+    print("  Feature demo: Francia vs Sudáfrica  @  Dallas")
+    print("  (UEFA team in heat → -30 Elo, warm-climate team no penalty)")
+    print("─" * 50)
+    demo2 = analyse_match(
+        home  = "Francia",
+        away  = "Sudáfrica",
+        venue = "Dallas",  # 34°C — Francia (UEFA) gets -30 Elo
+    )
+    dp2 = demo2["probs"]
+    print(f"  Home win : {dp2['home']:.1%}  |  Draw: {dp2['draw']:.1%}  |  Away win: {dp2['away']:.1%}")
+    print(f"  Adjustments active: {demo2['adjustments_applied']}")
     print()
