@@ -36,9 +36,9 @@
       "away": "Bosnia",
       "group": "B",
       "my_pick": "2-0",
-      "actual": null,
-      "points": null,
-      "note": "Modelo: 2-0 Canadá"
+      "actual": "1-1",
+      "points": 0,
+      "note": "Bosnia defensivo — modelo ignoró tendencia de empate"
     },
     {
       "match_id": "D1",
@@ -46,17 +46,17 @@
       "home": "USA",
       "away": "Paraguay",
       "group": "D",
-      "my_pick": "1-0",
-      "actual": null,
-      "points": null,
-      "note": "Partido cerrado, Enciso baja por lesión"
+      "my_pick": "2-1",
+      "actual": "4-1",
+      "points": 1,
+      "note": "Resultado correcto, USA goleó más de lo esperado"
     }
   ],
   "summary": {
-    "total_points": 4,
+    "total_points": 5,
     "exact_hits": 1,
-    "result_hits": 1,
-    "misses": 0,
-    "pending": 2
+    "result_hits": 2,
+    "misses": 1,
+    "pending": 0
   }
 }
