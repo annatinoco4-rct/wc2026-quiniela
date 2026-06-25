@@ -1,5 +1,7 @@
 # ⚽ wc2026-quiniela
 
+Winning a prediction pool isn't about predicting outcomes correctly. It's about outperforming predictably irrational competitors.
+
 **Quantitative strategy for winning a corporate World Cup pool — using Elo ratings, Poisson models, Monte Carlo simulation, and game theory.**
 
 This is not a football fan project. It's a decision-making problem under uncertainty with 101 irrational competitors.
