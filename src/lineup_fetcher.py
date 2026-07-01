@@ -27,11 +27,14 @@ langId doesn't affect PLAYER_IMPACT matching.
 
 Usage
 ~~~~~
-    from lineup_fetcher import get_game_id, fetch_lineup, adjusted_elo
+    from lineup_fetcher import get_game_id, fetch_lineup, fetch_live_events, adjusted_elo
 
     game_id = get_game_id("México", "Sudáfrica", "2026-06-11")
     lineup  = fetch_lineup(game_id)
     elo     = adjusted_elo("México", lineup["home"], base_elo=1857.17)
+
+    if lineup["status_group"] != 1:   # match already live or finished
+        events = fetch_live_events(game_id)
 """
 
 from __future__ import annotations
@@ -136,11 +139,12 @@ PLAYER_IMPACT: dict[str, dict] = {
 
 
 # ---------------------------------------------------------------------------
-# In-memory lineup cache (short TTL — lineup confirmations flip right up to
-# kickoff, so we don't want a stale "not confirmed" cached for too long)
+# In-memory caches (short TTL — lineup confirmations and live events flip
+# right up to and during kickoff, so we don't want stale data cached long)
 # ---------------------------------------------------------------------------
 
 _lineup_cache: dict[int, dict] = {}
+_game_payload_cache: dict[int, dict] = {}
 _CACHE_TTL_SECONDS = 60
 
 
@@ -157,6 +161,34 @@ def _get(url: str, params: Optional[dict] = None) -> dict:
         raise LineupFetchError(f"365scores request failed for {url}: {exc}") from exc
     except ValueError as exc:  # bad JSON
         raise LineupFetchError(f"365scores returned non-JSON for {url}: {exc}") from exc
+
+
+def _fetch_game_payload(game_id: int, use_cache: bool = True) -> dict:
+    """
+    Fetch (and cache) the raw `game` object from /web/game/ for *game_id*.
+
+    Shared by fetch_lineup() and fetch_live_events() so a single call covers
+    both — this endpoint returns lineups, events, and the members directory
+    all in one response, no reason to hit it twice within the TTL window.
+    """
+    now = time.time()
+    if use_cache:
+        cached = _game_payload_cache.get(game_id)
+        if cached and (now - cached["fetched_at"]) < _CACHE_TTL_SECONDS:
+            logger.debug("Game payload cache hit for gameId=%s", game_id)
+            return cached["data"]
+
+    payload = _get(f"{BASE_URL}/game/", {
+        "appTypeId": APP_TYPE_ID,
+        "langId": LANG_ID,
+        "gameId": game_id,
+    })
+    game = payload.get("game")
+    if not game:
+        raise LineupFetchError(f"No 'game' key in 365scores response for gameId={game_id}")
+
+    _game_payload_cache[game_id] = {"data": game, "fetched_at": now}
+    return game
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +212,11 @@ def fetch_lineup(game_id: int, use_cache: bool = True) -> dict:
         {
           "home": [{"name": str, "position": str, "status": "starting"|"substitute"}, ...],
           "away": [...],
-          "home_confirmed": bool,   # lineups.status == "Confirmado"
-          "away_confirmed": bool,
+          "confirmed": bool,        # game["hasLineups"] — both lineups are out
+          "home_confirmed": bool,   # homeCompetitor.lineups.status == "Confirmado"
+          "away_confirmed": bool,   # awayCompetitor.lineups.status == "Confirmado"
+          "status_group": int,     # game["statusGroup"] (1 = not started yet)
+          "status_text": str,      # game["statusText"], e.g. "Fim" (finished)
         }
         Coaching staff (status 4 in the API) are filtered out.
 
@@ -197,14 +232,7 @@ def fetch_lineup(game_id: int, use_cache: bool = True) -> dict:
             logger.debug("Lineup cache hit for gameId=%s", game_id)
             return cached["data"]
 
-    payload = _get(f"{BASE_URL}/game/", {
-        "appTypeId": APP_TYPE_ID,
-        "langId": LANG_ID,
-        "gameId": game_id,
-    })
-    game = payload.get("game")
-    if not game:
-        raise LineupFetchError(f"No 'game' key in 365scores response for gameId={game_id}")
+    game = _fetch_game_payload(game_id, use_cache=use_cache)
 
     # Player id -> display name directory (lineups.members only carries stats/position,
     # not the name itself — confirmed against a live fetch of this endpoint).
@@ -214,7 +242,13 @@ def fetch_lineup(game_id: int, use_cache: bool = True) -> dict:
         if "id" in m
     }
 
-    result: dict = {"home": [], "away": [], "home_confirmed": False, "away_confirmed": False}
+    result: dict = {
+        "home": [], "away": [],
+        "confirmed": bool(game.get("hasLineups", False)),
+        "home_confirmed": False, "away_confirmed": False,
+        "status_group": game.get("statusGroup"),
+        "status_text": game.get("statusText", ""),
+    }
 
     for side in ("home", "away"):
         competitor = game.get(f"{side}Competitor") or {}
@@ -235,6 +269,73 @@ def fetch_lineup(game_id: int, use_cache: bool = True) -> dict:
 
     _lineup_cache[game_id] = {"data": result, "fetched_at": now}
     return result
+
+
+# ---------------------------------------------------------------------------
+# fetch_live_events
+# ---------------------------------------------------------------------------
+
+def fetch_live_events(game_id: int, use_cache: bool = True) -> list[dict]:
+    """
+    Fetch the live event feed (goals, cards, substitutions) for a game.
+
+    Reads game["events"], each raw event expected to look like::
+
+        {"gameTime": <minute>, "eventType": {"name": <str>}, "competitorId": <int>, "playerId": <int>}
+
+    NOTE: the "events" key/shape is the one place in this module that
+    couldn't be confirmed against a live payload while building it (the
+    single-game response for an in-progress/finished match is large enough
+    that our fetch tooling truncated before reaching it — lineups + per-player
+    stats alone run past 80k characters). If 365scores names or nests this
+    differently, this is the first place to check — everything downstream
+    (gameday.py's live section) degrades gracefully to "no events" rather
+    than crashing.
+
+    Parameters
+    ----------
+    game_id : int
+    use_cache : bool
+        Reuse the cached raw game payload (shared with fetch_lineup) if fresh.
+
+    Returns
+    -------
+    list of dict, sorted by minute ascending, each::
+        {
+          "minute": float | None,
+          "type": str,             # e.g. "Gol", "Cartão Amarelo", "Substitution"
+          "competitor_id": int | None,
+          "player_id": int | None,
+          "player_name": str | None,   # resolved from game["members"], if found
+          "side": "home" | "away" | None,
+        }
+    """
+    game = _fetch_game_payload(game_id, use_cache=use_cache)
+
+    name_by_id = {m["id"]: m.get("name") for m in game.get("members", []) if "id" in m}
+    side_by_competitor_id = {}
+    for side in ("home", "away"):
+        cid = (game.get(f"{side}Competitor") or {}).get("id")
+        if cid is not None:
+            side_by_competitor_id[cid] = side
+
+    events = []
+    for e in game.get("events", []):
+        raw_type = e.get("eventType")
+        event_type = raw_type.get("name", "") if isinstance(raw_type, dict) else (raw_type or "")
+        competitor_id = e.get("competitorId")
+        player_id = e.get("playerId")
+        events.append({
+            "minute": e.get("gameTime"),
+            "type": event_type,
+            "competitor_id": competitor_id,
+            "player_id": player_id,
+            "player_name": name_by_id.get(player_id),
+            "side": side_by_competitor_id.get(competitor_id),
+        })
+
+    events.sort(key=lambda ev: (ev["minute"] is None, ev["minute"]))
+    return events
 
 
 # ---------------------------------------------------------------------------
@@ -421,5 +522,11 @@ if __name__ == "__main__":
                 print(f"    {p['status']:<10} {p['position']:<12} {p['name']}")
         home_elo = adjusted_elo(home, lineup["home"], base_elo=1857.17)
         print(f"\n  Elo ajustado {home}: {home_elo:.1f}")
+
+        if lineup["status_group"] != 1:
+            print(f"\n  Partido en curso/finalizado ({lineup['status_text']}) — eventos:")
+            for ev in fetch_live_events(gid):
+                who = ev["player_name"] or ev["player_id"]
+                print(f"    {ev['minute']}'  {ev['type']:<20} {who} ({ev['side']})")
     except (ValueError, LookupError, LineupFetchError) as exc:
         print(f"  ERROR: {exc}")

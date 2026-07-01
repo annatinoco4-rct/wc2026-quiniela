@@ -30,7 +30,14 @@ from model import (
     compute_ev,
 )
 from strategy import estimate_consensus, pool_adjusted_ev
-from lineup_fetcher import get_game_id, fetch_lineup, adjusted_elo, LineupFetchError, PLAYER_IMPACT
+from lineup_fetcher import (
+    get_game_id,
+    fetch_lineup,
+    fetch_live_events,
+    adjusted_elo,
+    LineupFetchError,
+    PLAYER_IMPACT,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -74,6 +81,8 @@ def analyse_with_lineups(home: str, away: str, date: str, is_host: bool = False)
     except (LineupFetchError, LookupError, ValueError) as exc:
         warnings.append(f"No se pudo obtener alineación ({exc}). Usando Elo base sin ajustar.")
 
+    live_events: list = []
+
     if lineup:
         home_elo = adjusted_elo(home, lineup["home"], base_home)
         away_elo = adjusted_elo(away, lineup["away"], base_away)
@@ -81,6 +90,13 @@ def analyse_with_lineups(home: str, away: str, date: str, is_host: bool = False)
                                        ("away", away, lineup["away_confirmed"])):
             if not confirmed:
                 warnings.append(f"Alineación de {team} aún NO confirmada — puede cambiar.")
+
+        # Match already live or finished (statusGroup 1 == not started yet) -> pull events too.
+        if lineup.get("status_group") != 1:
+            try:
+                live_events = fetch_live_events(game_id)
+            except LineupFetchError as exc:
+                warnings.append(f"No se pudieron obtener eventos en vivo ({exc}).")
     else:
         home_elo, away_elo = base_home, base_away
 
@@ -100,6 +116,7 @@ def analyse_with_lineups(home: str, away: str, date: str, is_host: bool = False)
         "elo_adjusted": {"home": round(home_elo, 1), "away": round(away_elo, 1)},
         "elo_delta": {"home": round(home_elo - base_home, 1), "away": round(away_elo - base_away, 1)},
         "lineup": lineup,
+        "live_events": live_events,
         "probs": probs,
         "top_scores": scores[:5],
         "ev": ev,
@@ -135,6 +152,52 @@ def _missing_key_players(team: str, lineup: list) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Live events (goals / cards / subs) — only populated once the match has
+# actually kicked off (see analyse_with_lineups: statusGroup != 1)
+# ---------------------------------------------------------------------------
+
+def _categorize_event(event_type: str) -> str:
+    """Fuzzy, language-agnostic bucket for an event's raw type string."""
+    t = (event_type or "").lower()
+    if "gol" in t or "goal" in t:
+        return "goal"
+    if "cart" in t or "card" in t:
+        return "card"
+    if "subst" in t or "substitu" in t:
+        return "sub"
+    return "other"
+
+
+def _print_live_events(result: dict) -> None:
+    events = result["live_events"]
+    if not events:
+        return
+
+    home, away = result["home"], result["away"]
+    print(f"\n  Eventos en vivo ({len(events)}):")
+    card_tally = {home: 0, away: 0}
+
+    for ev in events:
+        kind = _categorize_event(ev["type"])
+        team_label = {"home": home, "away": away}.get(ev["side"], "?")
+        who = ev["player_name"] or (f"jugador#{ev['player_id']}" if ev["player_id"] else "?")
+        minute = f"{ev['minute']:.0f}'" if ev["minute"] is not None else "?'"
+
+        if kind == "goal":
+            print(f"    {minute:>4}  GOL       {who} ({team_label})")
+        elif kind == "card":
+            card_tally[team_label] = card_tally.get(team_label, 0) + 1
+            print(f"    {minute:>4}  TARJETA   {who} ({team_label}) — {ev['type']}")
+        elif kind == "sub":
+            print(f"    {minute:>4}  CAMBIO    {who} ({team_label})")
+        else:
+            print(f"    {minute:>4}  {ev['type']:<10}{who} ({team_label})")
+
+    if any(card_tally.values()):
+        print(f"  Tarjetas acumuladas: {home} {card_tally.get(home, 0)}  |  {away} {card_tally.get(away, 0)}")
+
+
+# ---------------------------------------------------------------------------
 # Report
 # ---------------------------------------------------------------------------
 
@@ -165,6 +228,8 @@ def print_report(result: dict) -> None:
                 print(f"\n  Bajas/riesgos {team}:")
                 for f in flags:
                     print(f"    - {f}")
+
+    _print_live_events(result)
 
     print(f"\n  Prob. (ajustado): {home} {p['home']:.0%}  |  Empate {p['draw']:.0%}  |  {away} {p['away']:.0%}")
     print(f"  Top marcadores:")
