@@ -7,13 +7,18 @@ unofficial web API (no PyPI package — that one is broken/abandoned).
 Endpoint (single game, per 365scores' own frontend calls):
     GET https://webws.365scores.com/web/game/?appTypeId=5&langId=31&gameId={game_id}
 
-Fixtures/results endpoint (used to resolve a gameId from team names + date):
+Fixtures endpoints (used to resolve a gameId from team names + date) — tried
+in order, since /games/results/ only returns already-finished matches:
+    GET https://webws.365scores.com/web/games/?appTypeId=5&langId=31
+        &timezoneName=America/Mexico_City&userCountryId=-1&competitions={competition_id}
+        (live + scheduled)
     GET https://webws.365scores.com/web/games/results/?appTypeId=5&langId=31
         &timezoneName=America/Mexico_City&userCountryId=-1&competitions={competition_id}
+        (finished)
 
-Both were confirmed live against the real WC 2026 competition (id 5930) while
-building this module — e.g. gameId 4748888 = México vs Ecuador, Round of 16,
-2026-06-30, with `homeCompetitor.symbolicName == "MEX"`.
+All of these were confirmed live against the real WC 2026 competition (id 5930)
+while building this module — e.g. gameId 4748888 = México vs Ecuador, Round of
+16, 2026-06-30, with `homeCompetitor.symbolicName == "MEX"`.
 
 Key design choice: team matching uses 365scores' `symbolicName` (3-letter FIFA
 code, e.g. "MEX", "ARG") instead of the localized `name` field. `langId=31`
@@ -63,6 +68,15 @@ DEFAULT_TIMEZONE = "America/Mexico_City"
 # https://www.365scores.com/football/league/fifa-world-cup-5930
 WC_COMPETITION_ID = 5930
 
+# Fixture-search endpoints, in try-order. /games/results/ only returns finished
+# matches — live and scheduled-but-not-started games live under /games/ instead.
+# get_game_id() tries /games/ first (the common T-60/live case), then falls
+# back to /games/results/ for matches that have already wrapped up.
+GAME_ENDPOINTS = [
+    f"{BASE_URL}/games/",           # live + scheduled
+    f"{BASE_URL}/games/results/",   # finished
+]
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -72,7 +86,8 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
-_REQUEST_TIMEOUT = 10  # seconds
+_REQUEST_TIMEOUT = 8  # seconds — lower than the usual 10s default; the fixtures
+                       # endpoints were read-timing-out at 10s in practice.
 
 
 class LineupFetchError(RuntimeError):
@@ -195,16 +210,27 @@ def _fetch_game_payload(game_id: int, use_cache: bool = True) -> dict:
 # fetch_lineup
 # ---------------------------------------------------------------------------
 
-def fetch_lineup(game_id: int, use_cache: bool = True) -> dict:
+def fetch_lineup(
+    game_id: Optional[int] = None,
+    use_cache: bool = True,
+    home_team: Optional[str] = None,
+    away_team: Optional[str] = None,
+    date: Optional[str] = None,
+) -> dict:
     """
     Fetch the confirmed (or projected) lineup for a single 365scores game.
 
     Parameters
     ----------
-    game_id : int
-        365scores gameId (see get_game_id()).
+    game_id : int, optional
+        365scores gameId. If provided, used directly — skips the
+        get_game_id() fixture search entirely.
     use_cache : bool
         Reuse an in-memory result younger than _CACHE_TTL_SECONDS.
+    home_team, away_team, date : str, optional
+        Only used when *game_id* is None: forwarded to get_game_id() to
+        resolve it first. Ignored (with the search skipped) if game_id
+        is given directly.
 
     Returns
     -------
@@ -222,9 +248,19 @@ def fetch_lineup(game_id: int, use_cache: bool = True) -> dict:
 
     Raises
     ------
+    ValueError
+        If game_id is None and home_team/away_team/date weren't all provided
+        either (nothing to resolve or fetch).
     LineupFetchError
         On network/HTTP failure or an unparseable response.
     """
+    if game_id is None:
+        if not (home_team and away_team and date):
+            raise ValueError(
+                "fetch_lineup() necesita game_id, o home_team + away_team + date para resolverlo."
+            )
+        game_id = get_game_id(home_team, away_team, date)
+
     now = time.time()
     if use_cache:
         cached = _lineup_cache.get(game_id)
@@ -355,7 +391,13 @@ def _iter_fixture_pages(direction_key: str, start_data: dict, max_pages: int):
         yield data
 
 
-def get_game_id(home_team: str, away_team: str, date: str, max_pages_each_direction: int = 6) -> int:
+def get_game_id(
+    home_team: str,
+    away_team: str,
+    date: str,
+    game_id: Optional[int] = None,
+    max_pages_each_direction: int = 6,
+) -> int:
     """
     Resolve a 365scores gameId for a WC 2026 fixture from team names + date.
 
@@ -366,10 +408,23 @@ def get_game_id(home_team: str, away_team: str, date: str, max_pages_each_direct
         Matched via TEAM_CODE_MAP -> symbolicName, not the localized API name.
     date : str
         ISO date "YYYY-MM-DD" (matches results.csv / picks convention).
+    game_id : int, optional
+        If provided, skip the fixture search entirely and return this id
+        as-is (e.g. when you already pulled it from a 365scores match URL).
     max_pages_each_direction : int
         How many extra fixtures pages to walk forward and backward from the
         API's default window before giving up (the endpoint paginates around
         a "current" cursor, so a date far in the past/future may need paging).
+        Only used as a fallback — see search strategy below.
+
+    Search strategy
+    ----------------
+    1. One single-page request (no pagination) to GAME_ENDPOINTS[0] (/games/ —
+       live + scheduled matches, the common case when running this near kickoff).
+    2. If not found, one single-page request to GAME_ENDPOINTS[1] (/games/results/
+       — finished matches).
+    3. Only if neither default page has it: walk pagination (forward and
+       backward) on both endpoints before giving up.
 
     Returns
     -------
@@ -383,6 +438,9 @@ def get_game_id(home_team: str, away_team: str, date: str, max_pages_each_direct
     LookupError
         If no matching fixture is found within the paging budget.
     """
+    if game_id is not None:
+        return int(game_id)
+
     home_code = TEAM_CODE_MAP.get(home_team)
     away_code = TEAM_CODE_MAP.get(away_team)
     if not home_code or not away_code:
@@ -403,31 +461,41 @@ def get_game_id(home_team: str, away_team: str, date: str, max_pages_each_direct
                 return int(g["id"])
         return None
 
-    first = _get(f"{BASE_URL}/games/results/", {
+    params = {
         "appTypeId": APP_TYPE_ID,
         "langId": LANG_ID,
         "timezoneName": DEFAULT_TIMEZONE,
         "userCountryId": -1,
         "competitions": WC_COMPETITION_ID,
-    })
+    }
 
-    match = _search(first.get("games", []))
-    if match:
-        return match
-
-    for data in _iter_fixture_pages("nextPage", first, max_pages_each_direction):
+    # Fast path: one request per endpoint, no pagination. /games/ (live +
+    # scheduled) first, /games/results/ (finished) second.
+    first_pages: dict[str, dict] = {}
+    for endpoint in GAME_ENDPOINTS:
+        data = _get(endpoint, params)
+        first_pages[endpoint] = data
         match = _search(data.get("games", []))
         if match:
             return match
 
-    for data in _iter_fixture_pages("previousPage", first, max_pages_each_direction):
-        match = _search(data.get("games", []))
-        if match:
-            return match
+    # Fallback: the fixture wasn't on either endpoint's default window —
+    # walk pagination both directions on both endpoints before giving up.
+    for endpoint, first in first_pages.items():
+        for data in _iter_fixture_pages("nextPage", first, max_pages_each_direction):
+            match = _search(data.get("games", []))
+            if match:
+                return match
+
+        for data in _iter_fixture_pages("previousPage", first, max_pages_each_direction):
+            match = _search(data.get("games", []))
+            if match:
+                return match
 
     raise LookupError(
         f"No se encontró gameId para {home_team} vs {away_team} el {date} "
-        f"(competitions={WC_COMPETITION_ID}, ±{max_pages_each_direction} páginas)."
+        f"(competitions={WC_COMPETITION_ID}, endpoints={GAME_ENDPOINTS}, "
+        f"±{max_pages_each_direction} páginas)."
     )
 
 
